@@ -1,0 +1,285 @@
+---
+title: "Homework 6"
+author: Yujie Li
+date: 2024-12-01
+output: 
+  html_document:
+    toc: true 
+    toc_float: true 
+   
+output: github_document 
+---
+
+
+## Problem 1
+
+```{r, echo = FALSE, message = FALSE}
+library(dplyr)
+library(broom)
+library(ggplot2)
+library(rnoaa)
+```
+
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+
+```{r}
+set.seed(123)
+
+bootstrap_function <- function(data) {
+  sample_data <- data %>% sample_frac(size = 1, replace = TRUE)
+  model <- lm(tmax ~ tmin, data = sample_data)
+  
+  r_squared <- broom::glance(model)$r.squared
+  coefs <- broom::tidy(model)
+  log_beta_product <- log(coefs$estimate[1] * coefs$estimate[2])
+  
+  c(r_squared = r_squared, log_beta_product = log_beta_product)
+}
+
+bootstrap_results <- replicate(
+  5000,
+  bootstrap_function(weather_df),
+  simplify = "matrix"
+)
+bootstrap_df <- as.data.frame(t(bootstrap_results))
+colnames(bootstrap_df) <- c("r_squared", "log_beta_product")
+```
+
+```{r}
+ci_r_squared <- quantile(bootstrap_df$r_squared, probs = c(0.025, 0.975))
+ci_log_beta <- quantile(bootstrap_df$log_beta_product, probs = c(0.025, 0.975))
+
+ggplot(bootstrap_df, aes(x = r_squared)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black", alpha = 0.7) +
+  geom_vline(xintercept = ci_r_squared, linetype = "dashed", color = "red") +
+  labs(title = "Bootstrap Distribution of R-Squared",
+       x = "R-Squared", y = "Frequency") +
+  theme_minimal()
+
+ggplot(bootstrap_df, aes(x = log_beta_product)) +
+  geom_histogram(bins = 30, fill = "orange", color = "black", alpha = 0.7) +
+  geom_vline(xintercept = ci_log_beta, linetype = "dashed", color = "red") +
+  labs(title = "Bootstrap Distribution of Log(Beta0 * Beta1)",
+       x = "Log(Beta0 * Beta1)", y = "Frequency") +
+  theme_minimal()
+```
+
+
+## Problem 2 
+
+```{r, echo = FALSE, message = FALSE}
+library(dplyr)
+library(broom)
+library(purrr)
+library(ggplot2)
+library(tidyr)
+```
+
+```{r}
+homicide_data <- read.csv("homicide-data.csv", stringsAsFactors = FALSE)
+
+homicide_data <- homicide_data %>%
+  mutate(city_state = paste(city, state, sep = ", "))
+
+homicide_data <- homicide_data %>%
+  mutate(resolved = ifelse(grepl("Closed", disposition), 1, 0))
+
+excluded_cities <- c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")
+homicide_data <- homicide_data %>%
+  filter(!city_state %in% excluded_cities)
+
+homicide_data <- homicide_data %>%
+  filter(victim_race %in% c("White", "Black"))
+
+homicide_data <- homicide_data %>%
+  mutate(victim_age = as.numeric(victim_age)) %>%
+  filter(!is.na(victim_age))
+
+
+```
+```{r}
+# Identify rows with problematic victim_age
+invalid_ages <- homicide_data %>%
+  filter(is.na(as.numeric(victim_age)) & !is.na(victim_age))
+
+# Display rows with invalid victim_age
+print(invalid_ages)
+
+# Remove rows with invalid victim_age or fix them manually if needed
+homicide_data <- homicide_data %>%
+  mutate(victim_age = as.numeric(victim_age)) %>%
+  filter(!is.na(victim_age))
+
+```
+
+
+
+```{r}
+baltimore_data <- homicide_data %>%
+  filter(city_state == "Baltimore, MD")
+
+model_baltimore <- glm(
+  resolved ~ victim_age + victim_sex + victim_race,
+  family = binomial(link = "logit"),
+  data = baltimore_data
+)
+
+baltimore_summary <- tidy(model_baltimore, conf.int = TRUE) %>%
+  mutate(
+    odds_ratio = exp(estimate),
+    conf.low = exp(conf.low),
+    conf.high = exp(conf.high)
+  )
+
+print(baltimore_summary)
+```
+
+```{r}
+city_models <- homicide_data %>%
+  group_by(city_state) %>%
+  nest() %>%
+  mutate(
+    model = map(data, ~ glm(resolved ~ victim_age + victim_sex + victim_race,
+                            family = binomial(link = "logit"), data = .)),
+    tidied = map(model, ~ tidy(., conf.int = TRUE) %>%
+                   mutate(
+                     odds_ratio = exp(estimate),
+                     conf.low = exp(conf.low),
+                     conf.high = exp(conf.high)
+                   ) %>%
+                   filter(term == "victim_sexMale"))
+  ) %>%
+  unnest(tidied)
+
+city_plot <- city_models %>%
+  ggplot(aes(x = reorder(city_state, odds_ratio), y = odds_ratio)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  coord_flip() +
+  labs(
+    title = "Adjusted Odds Ratios for Solving Homicides",
+    x = "City",
+    y = "Odds Ratio (Male vs Female Victims)"
+  ) +
+  theme_minimal()
+
+print(city_plot)
+```
+## Comment on the graph
+Many cities have ORs close to 1, indicating minimal gender-based differences in homicide resolution rates.
+Some cities, such as Fresno, CA, and Minneapolis, MN, show ORs significantly greater than 1, implying higher resolution rates for male victims.
+Conversely, cities like Long Beach, CA, and New York, NY, show ORs less than 1, suggesting female victims have higher resolution rates in these areas.
+
+
+## Problem 3
+
+```{r, echo = FALSE, message = FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(modelr)
+library(purrr)
+```
+
+```{r}
+# Load the dataset
+birth_data <- read.csv("birthweight.csv", stringsAsFactors = FALSE)
+
+# Convert numeric variables to factors where appropriate
+birth_data <- birth_data %>%
+  mutate(
+    babysex = factor(babysex, levels = c(1, 2), labels = c("Male", "Female")),
+    malform = factor(malform, levels = c(0, 1), labels = c("Absent", "Present")),
+    frace = factor(frace, levels = c(1, 2, 3, 4, 8, 9)),
+    mrace = factor(mrace, levels = c(1, 2, 3, 4, 8))
+  )
+
+# Check for missing data
+missing_summary <- colSums(is.na(birth_data))
+print(missing_summary)
+
+# Impute missing data (if needed)
+birth_data <- birth_data %>%
+  drop_na() # Alternatively, you can impute missing values with other methods
+
+```
+```{r}
+# Fit the hypothesized model
+model_hypothesis <- lm(bwt ~ gaweeks + wtgain + mheight + bhead + malform + smoken, data = birth_data)
+
+# Summarize the model
+summary(model_hypothesis)
+
+```
+
+```{r}
+# Add predictions and residuals to the dataset
+birth_data <- birth_data %>%
+  add_predictions(model_hypothesis, var = "fitted_values") %>%
+  add_residuals(model_hypothesis, var = "residuals")
+
+# Plot residuals vs fitted values
+ggplot(birth_data, aes(x = fitted_values, y = residuals)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Residuals vs Fitted Values",
+    x = "Fitted Values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+```
+
+## Comparison to two other models
+```{r}
+model_length_gest <- lm(bwt ~ blength + gaweeks, data = birth_data)
+model_interactions <- lm(bwt ~ bhead * blength * babysex, data = birth_data)
+
+```
+
+
+```{r}
+set.seed(123)
+n_splits <- 100
+cv_results <- replicate(n_splits, {
+  split <- split_data(birth_data, prop = 0.8)
+  train <- split$train
+  test <- split$test
+  
+  model_hypothesis <- lm(bwt ~ gaweeks + wtgain + mheight + bhead + malform + smoken, data = train)
+  model_length_gest <- lm(bwt ~ blength + gaweeks, data = train)
+  model_interactions <- lm(bwt ~ bhead * blength * babysex, data = train)
+  
+  hypothesis_rmse <- rmse(test$bwt, predict(model_hypothesis, newdata = test))
+  length_gest_rmse <- rmse(test$bwt, predict(model_length_gest, newdata = test))
+  interactions_rmse <- rmse(test$bwt, predict(model_interactions, newdata = test))
+  
+  c(hypothesis_rmse, length_gest_rmse, interactions_rmse)
+})
+
+cv_results <- t(cv_results)
+
+cv_summary <- data.frame(
+  Model = c("Hypothesized Model", "Length + Gestational Age", "Interactions"),
+  Mean_RMSE = colMeans(cv_results)
+)
+
+print(cv_summary)
+
+
+```
+
